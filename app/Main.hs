@@ -1,79 +1,74 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric  #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
 import           Control.Monad.Trans (lift)
 import           Data.Yaml           (FromJSON (..))
 import           Data.Yaml.Config    (ignoreEnv, loadYamlSettings)
 import           Pipeline
+import           Pipeline.Internal.Core.UUID (genTaskUUID, genJobUUID)
 import           Prelude             hiding (read)
-import           System.FilePath     ((-<.>))
+import           System.FilePath     ((-<.>), (<.>))
 import           System.Process
 
 buildDissPipeline
   :: String
+  -> String
   -> Circuit
-       '[VariableStore]
+       '[Var]
        '[[String]]
-       '[VariableStore [String]]
-       '[VariableStore]
+       '[Var]
        '[String]
-       '[VariableStore String]
        N1
-buildDissPipeline name = mapC lhs2TexTask Empty <-> buildTexTask name
+buildDissPipeline outputFileName mainFileName = mapC lhs2TexTask <-> buildTexTask outputFileName mainFileName
 
 lhs2TexTask
   :: Circuit
-       '[VariableStore]
+       '[Var]
        '[String]
-       '[VariableStore String]
-       '[VariableStore]
+       '[Var]
        '[String]
-       '[VariableStore String]
        N1
-lhs2TexTask = task f (Var "dissertation.tex")
+lhs2TexTask = task f
  where
   f
-    :: UUID
-    -> HList' '[VariableStore] '[String]
-    -> VariableStore String
-    -> ExceptT SomeException IO (VariableStore String)
-  f _ (HCons' (Var fInName) HNil') _ = do
+    :: HList' '[Var] '[String]
+    -> Var String
+    -> ExceptT SomeException IO ()
+  f input output = do
+    (HCons fInName HNil) <- lift (fetch' input)
     let fOutName = fInName -<.> "tex"
     lift (callCommand ("lhs2tex -o " ++ fOutName ++ " " ++ fInName ++ " > lhs2tex.log"))
-    return (Var fOutName)
+    lift (save output fOutName)
 
 buildTexTask
   :: String
+  -> String
   -> Circuit
-       '[VariableStore]
+       '[Var]
        '[[String]]
-       '[VariableStore [String]]
-       '[VariableStore]
+       '[Var]
        '[String]
-       '[VariableStore String]
        N1
-buildTexTask name = task f Empty
+buildTexTask outputFileName mainFileName = task f
  where
   f
-    :: UUID
-    -> HList' '[VariableStore] '[[String]]
-    -> VariableStore String
-    -> ExceptT SomeException IO (VariableStore String)
-  f mainFileName (HCons' (Var _) HNil') _ = do
+    :: HList' '[Var] '[[String]]
+    -> Var String
+    -> ExceptT SomeException IO ()
+  f _ output = do
+
     lift
       (callCommand
         ("texfot --no-stderr latexmk -interaction=nonstopmode -pdf -no-shell-escape -bibtex -jobname="
-        ++ name
+        ++ outputFileName
         ++ " "
         ++ mainFileName
         )
       )
-    return (Var "dissertation.pdf")
+    lift (save output (outputFileName <.> "pdf"))
 
-
-files :: [String]
-files = ["dissertation.lhs", "introduction.lhs", "background.lhs"]
 
 data Config = Config
   { mainFile   :: FilePath
@@ -90,20 +85,22 @@ main :: IO ()
 main = do
   config <- loadConfig
   n      <-
-    startNetwork (buildDissPipeline (outputName config)) :: IO
+    startNetwork (buildDissPipeline (outputName config) (mainFile config)) :: IO
       ( BasicNetwork
-          '[VariableStore]
+          '[Var]
           '[[String]]
-          '[VariableStore [String]]
-          '[VariableStore]
+          '[Var]
           '[String]
-          '[VariableStore String]
       )
 
-  write (mainFile config -<.> "tex") (HCons' (Var (lhsFiles config)) HNil') n
+  inputJobUUID <- genJobUUID
+  inputTaskUUID <- genTaskUUID
+  (inputVar :: Var [FilePath]) <- empty inputTaskUUID inputJobUUID
+  save inputVar (lhsFiles config)
+  write inputJobUUID (HCons' inputVar HNil') n
 
-  o <- read n
-  print o
+  _ <- output_ n
+
 
   stopNetwork n
   print "Done"
